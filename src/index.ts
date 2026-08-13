@@ -94,6 +94,8 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
   })
 
   const maybeSpawnExtraction = async (session: Session): Promise<void> => {
+    const debug = process.env.DSH_SESSION_MEMORY_DEBUG !== undefined
+    if (debug) console.error('[dsh-session-memory] spawn check: guard=%s agent=%s', runningExtractions.has(session), sessions.has(session))
     if (runningExtractions.has(session)) return
     const agent = sessions.get(session)
     if (agent === undefined) return
@@ -146,6 +148,9 @@ async function spawnExtraction(
         ? tokens < options.initMessageTokens
         : tokens - lastSummaryTokens < options.updateTokenInterval
             && toolCalls - lastSummaryToolCalls < options.updateToolCallInterval
+    if (process.env.DSH_SESSION_MEMORY_DEBUG !== undefined) {
+      console.error(`[dsh-session-memory] extraction: tokens=${tokens} toolCalls=${toolCalls} belowThreshold=${belowThreshold}`)
+    }
     if (belowThreshold) return
 
     if (!lastSurfaceEventIsNaturalBreak(session)) return

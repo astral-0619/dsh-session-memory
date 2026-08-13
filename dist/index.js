@@ -1075,6 +1075,7 @@ function apply(ctx, config = {}) {
 		return next();
 	});
 	const maybeSpawnExtraction = async (session) => {
+		if (process.env.DSH_SESSION_MEMORY_DEBUG !== void 0) console.error("[dsh-session-memory] spawn check: guard=%s agent=%s", runningExtractions.has(session), sessions.has(session));
 		if (runningExtractions.has(session)) return;
 		const agent = sessions.get(session);
 		if (agent === void 0) return;
@@ -1102,7 +1103,9 @@ async function spawnExtraction(agent, logger, session, store, options, runningEx
 		const toolCalls = countToolCalls(session);
 		const lastSummaryTokens = state.last_summary_tokens ?? 0;
 		const lastSummaryToolCalls = state.last_summary_tool_calls ?? 0;
-		if (state.last_summary_seq === void 0 ? tokens < options.initMessageTokens : tokens - lastSummaryTokens < options.updateTokenInterval && toolCalls - lastSummaryToolCalls < options.updateToolCallInterval) return;
+		const belowThreshold = state.last_summary_seq === void 0 ? tokens < options.initMessageTokens : tokens - lastSummaryTokens < options.updateTokenInterval && toolCalls - lastSummaryToolCalls < options.updateToolCallInterval;
+		if (process.env.DSH_SESSION_MEMORY_DEBUG !== void 0) console.error(`[dsh-session-memory] extraction: tokens=${tokens} toolCalls=${toolCalls} belowThreshold=${belowThreshold}`);
+		if (belowThreshold) return;
 		if (!lastSurfaceEventIsNaturalBreak(session)) return;
 		const surface = session.surface.nodes;
 		if (surface.length === 0) return;
