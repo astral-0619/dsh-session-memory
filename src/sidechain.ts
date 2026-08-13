@@ -225,7 +225,14 @@ export async function runExtraction(
 
     const blocks: ContentBlock[] = assembler.blocks()
     if (process.env.DSH_SESSION_MEMORY_DEBUG !== undefined) {
-      console.error(`[dsh-session-memory] sidechain round ${round} blocks: ${JSON.stringify(blocks)}`)
+      console.error(`[dsh-session-memory] sidechain round ${round} blocks: ${JSON.stringify(blocks)} finish: ${JSON.stringify(assembler.finish)}`)
+    }
+    if (assembler.finish.kind !== 'stop' && assembler.finish.kind !== 'max-tokens') {
+      const reason = assembler.finish as { kind: string }
+      const detail = 'failure' in reason
+        ? JSON.stringify((reason as { failure: unknown }).failure)
+        : reason.kind
+      throw new Error(`sidechain LLM call ended with ${reason.kind}: ${detail}`)
     }
     const assistantBlocks: ContentBlock[] = []
     let anyToolCall = false
