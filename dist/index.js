@@ -1141,6 +1141,7 @@ async function spawnExtraction(agent, logger, session, store, options, runningEx
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		if (process.env.DSH_SESSION_MEMORY_DEBUG !== void 0) console.error(`[dsh-session-memory] extraction spawn failed: ${message}\n${error.stack ?? ""}`);
 		logger.warn(`session-memory extraction spawn failed: ${message}`);
 	} finally {
 		runningExtractions.delete(session);
