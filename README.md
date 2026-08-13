@@ -6,8 +6,8 @@ astral-code 的 session memory 系统在 DeepSeek Harness (dsh) 上的复刻：�
 
 1. **Sidechain 抽取**（每个 turn 结束后，自然断点处）：
    - 满足阈值（初始 100k token / 更新 20k token 或 10 次工具调用）才触发
-   - 独立 LLM 会话：只挂 `edit` 工具，最多 6 轮，非 edit 工具调用一律拒绝并回传提示
-   - 用 `summary.md` 当前内容 + 会话 transcript + 结构保持提示词生成编辑
+   - 独立 LLM 会话，**上下文原样 fork 主会话**：system prompt 用主循环同款组装（`ctx.systemPrompt.assemble(assembleContextFor(agent))` + `renderPrompt`），messages 直接取 `session.deriveMessages()`，唯一差异是工具面只挂 `edit`，非 edit 工具调用一律拒绝并回传提示，最多 6 轮
+   - updater 提示词（当前 summary + 结构保持要求）作为最后一条 user message 追加
    - 成功/失败都原子写入 `state.json`（`extraction_started_at_unix` 作为跨进程互斥标记）
 
 2. **存储**：每会话目录 `<storeDir>/<sessionId>/` 下 `summary.md`（总结）+ `state.json`（边界 seq、指纹、token/工具计数、错误）
@@ -42,12 +42,11 @@ apply(ctx, { storeDir: '.dsh/session-memory', thresholdRatio: 0.75 })
 | `updateTokenInterval` | `20000` | 更新抽取的 token 间隔 |
 | `updateToolCallInterval` | `10` | 更新抽取的工具调用间隔 |
 | `sidechainProvider` / `sidechainModel` | 空（跟随路由） | sidechain LLM 路由覆盖 |
-| `sidechainSystem` | 内置短提示词 | sidechain system prompt |
 | `transcriptPath` | 空 | 压缩 summary 里指向全文 transcript 的路径 |
 
 ## 与 astral 原版的已知差异
 
-- **sidechain system prompt**：原版把主会话的 assembled system prompt 复用到 sidechain；dsh 没有便宜的读取入口，改用固定短提示词（可用 `sidechainSystem` 覆盖）。
+- **sidechain system prompt 与原版一致**：通过 `ctx.systemPrompt.assemble(assembleContextFor(agent))` 取主循环同款组装并 `renderPrompt`，前缀不变（工具差异只在工具面，不进 system 文本）。
 - **无 legacy fallback**：原版 summary 无效时会退回传统压缩引擎；本 preset 不挂 `dsh-compaction-basic`，summary 无效时本轮不压缩并在 `state.json` 记错。
 - **压缩时的 summary 不做模型调用**：内容直接来自 sidechain 维护的 `summary.md`（事件里 `llmStreamCall` 不标）。
 - 抽取互斥的进程内守卫 + `state.json` 标记双保险（原版是 `RUNNING_EXTRACTIONS` 全局锁 + 同款状态标记）。

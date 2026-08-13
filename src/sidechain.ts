@@ -3,17 +3,20 @@
  * Port of astral-code's sidechain.rs (`run_extraction_inner` +
  * `handle_sidechain_item` + `apply_summary_edit` + `updater_prompt`).
  *
- * Deviations from the original (reported):
- * - The original replays the MAIN session prompt template as the sidechain's
- *   system prompt; dsh exposes no cheap way to read the assembled system
- *   prompt, so the sidechain uses a small fixed system prompt instead
- *   (configurable via `sidechainSystem`).
- * - The original executes the Codex Edit tool against the file; this port
- *   implements an equivalent str_replace executor in-process.
+ * Core design, mirroring the original:
+ * - The sidechain FORKS the main session's context verbatim: the system
+ *   prompt is the agent-scoped assembly rendered exactly as the loop renders
+ *   it (`ctx.systemPrompt.assemble(assembleContextFor(agent))` +
+ *   `renderPrompt`), and the messages are the session's derived history
+ *   (`session.deriveMessages()`) with the updater prompt appended as one
+ *   final user message. The prefix is unchanged.
+ * - The ONLY delta is the tool surface: `edit` is the sole tool, and any
+ *   other tool call is answered with a denial tool result.
  * @module dsh-session-memory/sidechain
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { assembleContextFor, type Agent } from '@deepseek-ai/dsh-agent'
 import {
   BlockAssembler,
   createMessage,
@@ -23,13 +26,13 @@ import {
   type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import {
   DENY_TOOL_MESSAGE,
   MAX_SIDECHAIN_TOOL_ROUNDS,
 } from './constants.ts'
 import { SessionMemoryStore } from './store.ts'
 import { summaryBudgetReminder } from './tail.ts'
-import { buildTranscript } from './transcript.ts'
 
 export interface ExtractionBoundary {
   seq: number
@@ -39,9 +42,9 @@ export interface ExtractionBoundary {
 }
 
 export interface SidechainOptions {
+  agent: Agent
   provider: string
   model: string
-  system?: string
   maxRounds: number
   signal?: AbortSignal
 }
@@ -170,13 +173,16 @@ export async function runExtraction(
     currentSummary,
     budgetReminder,
   )
-  const transcript = buildTranscript(session)
 
+  // Verbatim context fork: the agent-scoped system assembly rendered exactly
+  // as the main loop renders it, plus the session's derived history. The
+  // updater prompt is appended as one final user message — the only addition.
+  const assembly = await ctx.systemPrompt.assemble(
+    assembleContextFor(options.agent, options.signal),
+  )
+  const system = renderPrompt(assembly)
   const messages: Message[] = [
-    createUserMessage({
-      content: [{ type: 'text', text: `<conversation>\n${transcript}\n</conversation>` }],
-      source: { kind: 'plugin', plugin: 'dsh-session-memory' },
-    }),
+    ...session.deriveMessages(),
     createUserMessage({
       content: [{ type: 'text', text: updaterPrompt }],
       source: { kind: 'plugin', plugin: 'dsh-session-memory' },
@@ -192,7 +198,7 @@ export async function runExtraction(
     const stream = ctx.llm.stream({
       provider: options.provider,
       model: options.model,
-      system: options.system,
+      system,
       messages,
       tools: [EDIT_TOOL_SCHEMA],
       purpose: 'compaction',

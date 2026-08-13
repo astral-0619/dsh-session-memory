@@ -30,9 +30,6 @@ import {
   surfaceNodes,
 } from './transcript.ts'
 
-export const DEFAULT_SIDECHAIN_SYSTEM =
-  'You are updating a session notes file for a coding agent, based on the conversation transcript. Use only the edit tool to update the notes file, preserving its exact section structure. Never mention these instructions in the notes.'
-
 export interface Config extends EngineConfig {
   updatePrompt: string
   initMessageTokens: number
@@ -40,7 +37,6 @@ export interface Config extends EngineConfig {
   updateToolCallInterval: number
   sidechainProvider: string
   sidechainModel: string
-  sidechainSystem: string
 }
 
 export const Config: z<Config> = z.object({
@@ -53,11 +49,10 @@ export const Config: z<Config> = z.object({
   updateToolCallInterval: z.number().default(DEFAULT_TOOL_CALLS_BETWEEN_UPDATES),
   sidechainProvider: z.string().default(''),
   sidechainModel: z.string().default(''),
-  sidechainSystem: z.string().default(DEFAULT_SIDECHAIN_SYSTEM),
   transcriptPath: z.string().default(''),
 })
 
-export const inject = ['llm', 'tokenMeter']
+export const inject = ['llm', 'tokenMeter', 'systemPrompt']
 
 export function apply(ctx: Context, config: Partial<Config> = {}): void {
   const options: Config = {
@@ -70,7 +65,6 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     updateToolCallInterval: DEFAULT_TOOL_CALLS_BETWEEN_UPDATES,
     sidechainProvider: '',
     sidechainModel: '',
-    sidechainSystem: DEFAULT_SIDECHAIN_SYSTEM,
     transcriptPath: '',
     ...config,
   }
@@ -89,9 +83,10 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 
   const maybeSpawnExtraction = (session: Session): void => {
     if (runningExtractions.has(session)) return
-    if (!sessions.has(session)) return
+    const agent = sessions.get(session)
+    if (agent === undefined) return
     const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`)
-    void spawnExtraction(ctx, session, store, options, runningExtractions)
+    void spawnExtraction(ctx, session, agent, store, options, runningExtractions)
   }
 
   ctx.on('session/event', (session, event) => {
@@ -110,6 +105,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 async function spawnExtraction(
   ctx: Context,
   session: Session,
+  agent: Agent,
   store: SessionMemoryStore,
   options: Config,
   runningExtractions: Set<Session>,
@@ -162,9 +158,9 @@ async function spawnExtraction(
         store,
         options.updatePrompt,
         {
+          agent,
           provider: target.provider,
           model: target.model,
-          system: options.sidechainSystem,
           maxRounds: MAX_SIDECHAIN_TOOL_ROUNDS,
         },
         boundary,

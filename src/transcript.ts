@@ -109,18 +109,6 @@ export function eventTranscriptLine(event: SessionEvent): string {
   }
 }
 
-/** Build the sidechain transcript over the whole surface. */
-export function buildTranscript(session: Session): string {
-  const lines: string[] = []
-  for (const seq of session.surface.nodes) {
-    const event = session.events.find(candidate => candidate.seq === seq)
-    if (event === undefined) continue
-    const line = eventTranscriptLine(event)
-    if (line.length > 0) lines.push(line)
-  }
-  return lines.join('\n')
-}
-
 /**
  * Stable fingerprint of a surface node: hash of seq + type + text-ish content.
  * Mirrors astral-code's `item_fingerprint` boundary-stability contract.

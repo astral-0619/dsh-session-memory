@@ -86,11 +86,19 @@ function inspectEntryState(events: readonly SessionEvent[]): CompactionEntryStat
 }
 
 export class SessionMemoryEngine extends CompactionEngine {
+  private readonly config: EngineConfig
+
   constructor(
     ctx: Context,
-    private readonly config: EngineConfig,
+    config: Partial<EngineConfig> = {},
   ) {
     super(ctx)
+    this.config = {
+      thresholdRatio: 0.75,
+      summaryTemplate: '',
+      storeDir: '.dsh/session-memory',
+      ...config,
+    }
   }
 
   private storeFor(session: Session): SessionMemoryStore {

@@ -4,6 +4,8 @@ import { CompactionEngine, CompactionId, ManualCompactionError, compactCheckpoin
 import { BlockAssembler, createMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { assembleContextFor } from "@deepseek-ai/dsh-agent";
+import { renderPrompt } from "@deepseek-ai/dsh-system-prompt";
 //#region src/constants.ts
 /**
 * Ported constants from astral-code's `session_memory` module
@@ -326,17 +328,6 @@ function eventTranscriptLine(event) {
 		default: return "";
 	}
 }
-/** Build the sidechain transcript over the whole surface. */
-function buildTranscript(session) {
-	const lines = [];
-	for (const seq of session.surface.nodes) {
-		const event = session.events.find((candidate) => candidate.seq === seq);
-		if (event === void 0) continue;
-		const line = eventTranscriptLine(event);
-		if (line.length > 0) lines.push(line);
-	}
-	return lines.join("\n");
-}
 /**
 * Stable fingerprint of a surface node: hash of seq + type + text-ish content.
 * Mirrors astral-code's `item_fingerprint` boundary-stability contract.
@@ -583,9 +574,14 @@ function inspectEntryState(events) {
 }
 var SessionMemoryEngine = class extends CompactionEngine {
 	config;
-	constructor(ctx, config) {
+	constructor(ctx, config = {}) {
 		super(ctx);
-		this.config = config;
+		this.config = {
+			thresholdRatio: .75,
+			summaryTemplate: "",
+			storeDir: ".dsh/session-memory",
+			...config
+		};
 	}
 	storeFor(session) {
 		return new SessionMemoryStore(session.id, `${this.config.storeDir}/${session.id}`);
@@ -866,17 +862,9 @@ async function runExtraction(ctx, session, store, updatePromptTemplate, options,
 	let workingText = currentSummary;
 	const budgetReminder = summaryBudgetReminder(currentSummary);
 	const updaterPrompt = buildUpdaterPrompt(updatePromptTemplate, store.summaryPath, currentSummary, budgetReminder);
-	const transcript = buildTranscript(session);
-	const messages = [createUserMessage({
-		content: [{
-			type: "text",
-			text: `<conversation>\n${transcript}\n</conversation>`
-		}],
-		source: {
-			kind: "plugin",
-			plugin: "dsh-session-memory"
-		}
-	}), createUserMessage({
+	const assembly = await ctx.systemPrompt.assemble(assembleContextFor(options.agent, options.signal));
+	const system = renderPrompt(assembly);
+	const messages = [...session.deriveMessages(), createUserMessage({
 		content: [{
 			type: "text",
 			text: updaterPrompt
@@ -894,7 +882,7 @@ async function runExtraction(ctx, session, store, updatePromptTemplate, options,
 		const stream = ctx.llm.stream({
 			provider: options.provider,
 			model: options.model,
-			system: options.system,
+			system,
 			messages,
 			tools: [EDIT_TOOL_SCHEMA],
 			purpose: "compaction",
@@ -971,7 +959,6 @@ function createAssistantMessageWithBlocks(blocks, options) {
 }
 //#endregion
 //#region src/index.ts
-const DEFAULT_SIDECHAIN_SYSTEM = "You are updating a session notes file for a coding agent, based on the conversation transcript. Use only the edit tool to update the notes file, preserving its exact section structure. Never mention these instructions in the notes.";
 const Config = z.object({
 	storeDir: z.string().default(".dsh/session-memory"),
 	summaryTemplate: z.string().default(DEFAULT_SUMMARY),
@@ -982,10 +969,13 @@ const Config = z.object({
 	updateToolCallInterval: z.number().default(10),
 	sidechainProvider: z.string().default(""),
 	sidechainModel: z.string().default(""),
-	sidechainSystem: z.string().default(DEFAULT_SIDECHAIN_SYSTEM),
 	transcriptPath: z.string().default("")
 });
-const inject = ["llm", "tokenMeter"];
+const inject = [
+	"llm",
+	"tokenMeter",
+	"systemPrompt"
+];
 function apply(ctx, config = {}) {
 	const options = {
 		storeDir: ".dsh/session-memory",
@@ -997,7 +987,6 @@ function apply(ctx, config = {}) {
 		updateToolCallInterval: 10,
 		sidechainProvider: "",
 		sidechainModel: "",
-		sidechainSystem: DEFAULT_SIDECHAIN_SYSTEM,
 		transcriptPath: "",
 		...config
 	};
@@ -1010,8 +999,9 @@ function apply(ctx, config = {}) {
 	});
 	const maybeSpawnExtraction = (session) => {
 		if (runningExtractions.has(session)) return;
-		if (!sessions.has(session)) return;
-		spawnExtraction(ctx, session, new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`), options, runningExtractions);
+		const agent = sessions.get(session);
+		if (agent === void 0) return;
+		spawnExtraction(ctx, session, agent, new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`), options, runningExtractions);
 	};
 	ctx.on("session/event", (session, event) => {
 		if (event.type === "turn/end") queueMicrotask(() => maybeSpawnExtraction(session));
@@ -1020,7 +1010,7 @@ function apply(ctx, config = {}) {
 		if (status === "idle") maybeSpawnExtraction(agent.session);
 	});
 }
-async function spawnExtraction(ctx, session, store, options, runningExtractions) {
+async function spawnExtraction(ctx, session, agent, store, options, runningExtractions) {
 	runningExtractions.add(session);
 	try {
 		const state = await store.readState();
@@ -1050,9 +1040,9 @@ async function spawnExtraction(ctx, session, store, options, runningExtractions)
 		await store.markExtractionStarted();
 		try {
 			await runExtraction(ctx, session, store, options.updatePrompt, {
+				agent,
 				provider: target.provider,
 				model: target.model,
-				system: options.sidechainSystem,
 				maxRounds: 6
 			}, boundary);
 		} catch (error) {
@@ -1079,4 +1069,4 @@ function resolveSidechainTarget(session, options) {
 	};
 }
 //#endregion
-export { Config, DEFAULT_SIDECHAIN_SYSTEM, apply, inject };
+export { Config, apply, inject };
