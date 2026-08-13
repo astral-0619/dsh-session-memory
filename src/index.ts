@@ -8,9 +8,10 @@
  * @module dsh-session-memory
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, LoggerService } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
+import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import z from '@deepseek-ai/schemastery'
 import {
   DEFAULT_MINIMUM_MESSAGE_TOKENS_TO_INIT,
@@ -21,7 +22,7 @@ import {
   MAX_SIDECHAIN_TOOL_ROUNDS,
 } from './constants.ts'
 import { SessionMemoryEngine, type EngineConfig } from './engine.ts'
-import { runExtraction } from './sidechain.ts'
+import { runExtraction, type SidechainServices } from './sidechain.ts'
 import { SessionMemoryStore } from './store.ts'
 import {
   countToolCalls,
@@ -71,6 +72,17 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 
   ctx.plugin(SessionMemoryEngine, options)
 
+  // Service references captured eagerly: the sidechain extraction runs after
+  // the turn ends and can outlive the harness context (one-shot drivers
+  // dispose the tree right after quiescence), so it must not resolve services
+  // through the context proxy at extraction time.
+  const services: SidechainServices = {
+    llm: ctx.llm,
+    systemPrompt: ctx.systemPrompt,
+  }
+  const logger = ctx.logger
+  const tokenMeter = ctx.tokenMeter
+
   // session -> agent registry populated on every pre-step visit.
   const sessions = new WeakMap<Session, Agent>()
   // In-process extraction guard (port of RUNNING_EXTRACTIONS).
@@ -87,7 +99,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     if (agent === undefined) return
     const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`)
     await store.ensure(options.summaryTemplate)
-    void spawnExtraction(ctx, session, agent, store, options, runningExtractions)
+    void spawnExtraction(services, tokenMeter, logger, session, agent, store, options, runningExtractions)
   }
 
   ctx.on('session/event', (session, event) => {
@@ -104,7 +116,9 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 }
 
 async function spawnExtraction(
-  ctx: Context,
+  services: SidechainServices,
+  tokenMeter: TokenMeter,
+  logger: LoggerService,
   session: Session,
   agent: Agent,
   store: SessionMemoryStore,
@@ -114,7 +128,7 @@ async function spawnExtraction(
   runningExtractions.add(session)
   try {
     const state = await store.readState()
-    const measurement = ctx.tokenMeter.measure(session)
+    const measurement = tokenMeter.measure(session)
     const tokens = measurement.totalTokens
     const toolCalls = countToolCalls(session)
 
@@ -154,7 +168,7 @@ async function spawnExtraction(
     await store.markExtractionStarted()
     try {
       await runExtraction(
-        ctx,
+        services,
         session,
         store,
         options.updatePrompt,
@@ -169,11 +183,11 @@ async function spawnExtraction(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await store.finishExtraction(undefined, message)
-      ctx.logger.warn(`session-memory extraction failed: ${message}`)
+      logger.warn(`session-memory extraction failed: ${message}`)
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    ctx.logger.warn(`session-memory extraction spawn failed: ${message}`)
+    logger.warn(`session-memory extraction spawn failed: ${message}`)
   } finally {
     runningExtractions.delete(session)
   }

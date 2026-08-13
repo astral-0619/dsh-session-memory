@@ -828,6 +828,22 @@ var SessionMemoryEngine = class extends CompactionEngine {
 };
 //#endregion
 //#region src/sidechain.ts
+/**
+* Sidechain extraction: a bounded LLM loop that edits `summary.md` in place.
+* Port of astral-code's sidechain.rs (`run_extraction_inner` +
+* `handle_sidechain_item` + `apply_summary_edit` + `updater_prompt`).
+*
+* Core design, mirroring the original:
+* - The sidechain FORKS the main session's context verbatim: the system
+*   prompt is the agent-scoped assembly rendered exactly as the loop renders
+*   it (`ctx.systemPrompt.assemble(assembleContextFor(agent))` +
+*   `renderPrompt`), and the messages are the session's derived history
+*   (`session.deriveMessages()`) with the updater prompt appended as one
+*   final user message. The prefix is unchanged.
+* - The ONLY delta is the tool surface: `edit` is the sole tool, and any
+*   other tool call is answered with a denial tool result.
+* @module dsh-session-memory/sidechain
+*/
 const EDIT_TOOL_NAME = "edit";
 /** Port of the sidechain-visible tool surface: Edit only. */
 const EDIT_TOOL_SCHEMA = {
@@ -911,12 +927,12 @@ function buildUpdaterPrompt(template, summaryPath, currentSummary, budgetReminde
 	return `${output}${budgetReminder}`;
 }
 /** Port of `run_extraction` + `run_extraction_inner`. */
-async function runExtraction(ctx, session, store, updatePromptTemplate, options, boundary) {
+async function runExtraction(services, session, store, updatePromptTemplate, options, boundary) {
 	const currentSummary = await store.readSummary();
 	let workingText = currentSummary;
 	const budgetReminder = summaryBudgetReminder(currentSummary);
 	const updaterPrompt = buildUpdaterPrompt(updatePromptTemplate, store.summaryPath, currentSummary, budgetReminder);
-	const assembly = await ctx.systemPrompt.assemble(assembleContextFor(options.agent, options.signal));
+	const assembly = await services.systemPrompt.assemble(assembleContextFor(options.agent, options.signal));
 	const system = renderPrompt(assembly);
 	const messages = [...session.deriveMessages(), createUserMessage({
 		content: [{
@@ -933,7 +949,7 @@ async function runExtraction(ctx, session, store, updatePromptTemplate, options,
 		let editedSummary = false;
 		let anyToolCall = false;
 		const assembler = new BlockAssembler();
-		const stream = ctx.llm.stream({
+		const stream = services.llm.stream({
 			provider: options.provider,
 			model: options.model,
 			system,
@@ -1045,6 +1061,12 @@ function apply(ctx, config = {}) {
 		...config
 	};
 	ctx.plugin(SessionMemoryEngine, options);
+	const services = {
+		llm: ctx.llm,
+		systemPrompt: ctx.systemPrompt
+	};
+	const logger = ctx.logger;
+	const tokenMeter = ctx.tokenMeter;
 	const sessions = /* @__PURE__ */ new WeakMap();
 	const runningExtractions = /* @__PURE__ */ new Set();
 	ctx.on("agent/pre-step", ({ agent }, next) => {
@@ -1057,7 +1079,7 @@ function apply(ctx, config = {}) {
 		if (agent === void 0) return;
 		const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`);
 		await store.ensure(options.summaryTemplate);
-		spawnExtraction(ctx, session, agent, store, options, runningExtractions);
+		spawnExtraction(services, tokenMeter, logger, session, agent, store, options, runningExtractions);
 	};
 	ctx.on("session/event", (session, event) => {
 		if (event.type === "turn/end") queueMicrotask(() => void maybeSpawnExtraction(session));
@@ -1066,11 +1088,11 @@ function apply(ctx, config = {}) {
 		if (status === "idle") maybeSpawnExtraction(agent.session);
 	});
 }
-async function spawnExtraction(ctx, session, agent, store, options, runningExtractions) {
+async function spawnExtraction(services, tokenMeter, logger, session, agent, store, options, runningExtractions) {
 	runningExtractions.add(session);
 	try {
 		const state = await store.readState();
-		const measurement = ctx.tokenMeter.measure(session);
+		const measurement = tokenMeter.measure(session);
 		const tokens = measurement.totalTokens;
 		const toolCalls = countToolCalls(session);
 		const lastSummaryTokens = state.last_summary_tokens ?? 0;
@@ -1095,7 +1117,7 @@ async function spawnExtraction(ctx, session, agent, store, options, runningExtra
 		}
 		await store.markExtractionStarted();
 		try {
-			await runExtraction(ctx, session, store, options.updatePrompt, {
+			await runExtraction(services, session, store, options.updatePrompt, {
 				agent,
 				provider: target.provider,
 				model: target.model,
@@ -1104,11 +1126,11 @@ async function spawnExtraction(ctx, session, agent, store, options, runningExtra
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			await store.finishExtraction(void 0, message);
-			ctx.logger.warn(`session-memory extraction failed: ${message}`);
+			logger.warn(`session-memory extraction failed: ${message}`);
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		ctx.logger.warn(`session-memory extraction spawn failed: ${message}`);
+		logger.warn(`session-memory extraction spawn failed: ${message}`);
 	} finally {
 		runningExtractions.delete(session);
 	}

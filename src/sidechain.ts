@@ -15,18 +15,18 @@
  * @module dsh-session-memory/sidechain
  */
 
-import type { Context } from '@deepseek-ai/cordis'
 import { assembleContextFor, type Agent } from '@deepseek-ai/dsh-agent'
 import {
   BlockAssembler,
   createMessage,
   createUserMessage,
   type ContentBlock,
+  type LlmRuntime,
   type Message,
   type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { renderPrompt, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import {
   DENY_TOOL_MESSAGE,
   MAX_SIDECHAIN_TOOL_ROUNDS,
@@ -47,6 +47,17 @@ export interface SidechainOptions {
   model: string
   maxRounds: number
   signal?: AbortSignal
+}
+
+/**
+ * Service references captured eagerly at `apply()` time. The sidechain runs
+ * after a turn ends and may outlive the harness context (one-shot drivers
+ * dispose the tree right after quiescence); holding the service objects
+ * directly keeps the extraction usable without touching the context proxy.
+ */
+export interface SidechainServices {
+  llm: LlmRuntime
+  systemPrompt: SystemPrompt
 }
 
 const EDIT_TOOL_NAME = 'edit'
@@ -157,7 +168,7 @@ export function buildUpdaterPrompt(
 
 /** Port of `run_extraction` + `run_extraction_inner`. */
 export async function runExtraction(
-  ctx: Context,
+  services: SidechainServices,
   session: Session,
   store: SessionMemoryStore,
   updatePromptTemplate: string,
@@ -177,7 +188,7 @@ export async function runExtraction(
   // Verbatim context fork: the agent-scoped system assembly rendered exactly
   // as the main loop renders it, plus the session's derived history. The
   // updater prompt is appended as one final user message — the only addition.
-  const assembly = await ctx.systemPrompt.assemble(
+  const assembly = await services.systemPrompt.assemble(
     assembleContextFor(options.agent, options.signal),
   )
   const system = renderPrompt(assembly)
@@ -195,7 +206,7 @@ export async function runExtraction(
     let anyToolCall = false
     const assembler = new BlockAssembler()
 
-    const stream = ctx.llm.stream({
+    const stream = services.llm.stream({
       provider: options.provider,
       model: options.model,
       system,
