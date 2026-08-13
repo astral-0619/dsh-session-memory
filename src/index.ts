@@ -133,7 +133,12 @@ async function spawnExtraction(
     // property proxies reject undeclared injects and inactive contexts, while
     // get() reads the store directly. The adapter registry lives on these
     // root-plane instances — the same ones the loop uses.
-    const measurement = ctx.get('tokenMeter').measure(session)
+    const tokenMeter = ctx.get('tokenMeter')
+    if (tokenMeter === undefined) {
+      await store.finishExtraction(undefined, 'tokenMeter service unavailable')
+      return
+    }
+    const measurement = tokenMeter.measure(session)
     const tokens = measurement.totalTokens
     const toolCalls = countToolCalls(session)
 

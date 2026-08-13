@@ -1098,7 +1098,12 @@ async function spawnExtraction(ctx, agent, logger, session, store, options) {
 	try {
 		await store.ensure(options.summaryTemplate);
 		const state = await store.readState();
-		const measurement = ctx.get("tokenMeter").measure(session);
+		const tokenMeter = ctx.get("tokenMeter");
+		if (tokenMeter === void 0) {
+			await store.finishExtraction(void 0, "tokenMeter service unavailable");
+			return;
+		}
+		const measurement = tokenMeter.measure(session);
 		const tokens = measurement.totalTokens;
 		const toolCalls = countToolCalls(session);
 		const lastSummaryTokens = state.last_summary_tokens ?? 0;
