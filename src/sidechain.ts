@@ -18,7 +18,9 @@
 import { assembleContextFor, type Agent } from '@deepseek-ai/dsh-agent'
 import {
   BlockAssembler,
+  CallId,
   createMessage,
+  createToolResultMessage,
   createUserMessage,
   type ContentBlock,
   type LlmRuntime,
@@ -234,15 +236,20 @@ export async function runExtraction(
         : reason.kind
       throw new Error(`sidechain LLM call ended with ${reason.kind}: ${detail}`)
     }
-    const assistantBlocks: ContentBlock[] = []
+
+    // Message-shape contract (mirrors derived history): one assistant message
+    // carrying the tool-call blocks, then one tool-result message per call.
+    const assistantContent: ContentBlock[] = []
+    const results: { callId: string; text: string; isError: boolean }[] = []
     let anyToolCall = false
     for (const block of blocks) {
-      if (block.type !== 'tool-call') {
-        // Text and reasoning stay local to this extraction; nothing enters notes.
+      if (block.type === 'text' || block.type === 'reasoning') {
+        assistantContent.push(block)
         continue
       }
+      if (block.type !== 'tool-call') continue
       anyToolCall = true
-      assistantBlocks.push(block)
+      assistantContent.push(block)
       if (block.name === EDIT_TOOL_NAME) {
         let args: EditArgs = {}
         try {
@@ -252,19 +259,10 @@ export async function runExtraction(
         }
         const outcome = applySummaryEdit(workingText, args, store.summaryPath)
         workingText = outcome.text
-        assistantBlocks.push({
-          type: 'tool-result',
-          toolCallId: block.id,
-          content: [{ type: 'text', text: outcome.result }],
-        })
+        results.push({ callId: block.id, text: outcome.result, isError: false })
         if (outcome.edited) edited = true
       } else {
-        assistantBlocks.push({
-          type: 'tool-result',
-          toolCallId: block.id,
-          content: [{ type: 'text', text: DENY_TOOL_MESSAGE(store.summaryPath) }],
-          isError: true,
-        })
+        results.push({ callId: block.id, text: DENY_TOOL_MESSAGE(store.summaryPath), isError: true })
       }
     }
 
@@ -272,7 +270,22 @@ export async function runExtraction(
     if (round >= options.maxRounds) {
       throw new Error('session memory extraction exceeded tool-call rounds')
     }
-    messages.push(createAssistantMessageWithBlocks(assistantBlocks, options))
+    messages.push(createMessage({
+      role: 'assistant',
+      content: assistantContent,
+      source: {
+        kind: 'model',
+        provider: options.provider,
+        model: options.model,
+      },
+    }))
+    for (const result of results) {
+      messages.push(createToolResultMessage({
+        callId: CallId(result.callId),
+        content: [{ type: 'text', text: result.text }],
+        isError: result.isError,
+      }))
+    }
   }
 
   if (edited) await store.atomicWriteSummary(workingText)
@@ -286,20 +299,5 @@ async function finishExtractionSuccess(store: SessionMemoryStore, boundary: Extr
     fingerprint: boundary.fingerprint,
     tokens: boundary.tokens,
     toolCalls: boundary.toolCalls,
-  })
-}
-
-function createAssistantMessageWithBlocks(
-  blocks: ContentBlock[],
-  options: SidechainOptions,
-): Message {
-  return createMessage({
-    role: 'assistant',
-    content: blocks,
-    source: {
-      kind: 'model',
-      provider: options.provider,
-      model: options.model,
-    },
   })
 }

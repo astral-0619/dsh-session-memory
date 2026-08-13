@@ -2,7 +2,7 @@ import z from "@deepseek-ai/schemastery";
 import { createHash, randomUUID } from "node:crypto";
 import { assembleContextFor } from "@deepseek-ai/dsh-agent";
 import { CompactionEngine, CompactionId, ManualCompactionError, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
-import { BlockAssembler, CONTEXT_WINDOW_EXCEEDED_CODE, createMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { BlockAssembler, CONTEXT_WINDOW_EXCEEDED_CODE, CallId, createMessage, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { renderPrompt } from "@deepseek-ai/dsh-system-prompt";
@@ -970,12 +970,17 @@ async function runExtraction(services, session, store, updatePromptTemplate, opt
 			const detail = "failure" in reason ? JSON.stringify(reason.failure) : reason.kind;
 			throw new Error(`sidechain LLM call ended with ${reason.kind}: ${detail}`);
 		}
-		const assistantBlocks = [];
+		const assistantContent = [];
+		const results = [];
 		let anyToolCall = false;
 		for (const block of blocks) {
+			if (block.type === "text" || block.type === "reasoning") {
+				assistantContent.push(block);
+				continue;
+			}
 			if (block.type !== "tool-call") continue;
 			anyToolCall = true;
-			assistantBlocks.push(block);
+			assistantContent.push(block);
 			if (block.name === EDIT_TOOL_NAME) {
 				let args = {};
 				try {
@@ -985,28 +990,37 @@ async function runExtraction(services, session, store, updatePromptTemplate, opt
 				}
 				const outcome = applySummaryEdit(workingText, args, store.summaryPath);
 				workingText = outcome.text;
-				assistantBlocks.push({
-					type: "tool-result",
-					toolCallId: block.id,
-					content: [{
-						type: "text",
-						text: outcome.result
-					}]
+				results.push({
+					callId: block.id,
+					text: outcome.result,
+					isError: false
 				});
 				if (outcome.edited) edited = true;
-			} else assistantBlocks.push({
-				type: "tool-result",
-				toolCallId: block.id,
-				content: [{
-					type: "text",
-					text: DENY_TOOL_MESSAGE(store.summaryPath)
-				}],
+			} else results.push({
+				callId: block.id,
+				text: DENY_TOOL_MESSAGE(store.summaryPath),
 				isError: true
 			});
 		}
 		if (!anyToolCall) break;
 		if (round >= options.maxRounds) throw new Error("session memory extraction exceeded tool-call rounds");
-		messages.push(createAssistantMessageWithBlocks(assistantBlocks, options));
+		messages.push(createMessage({
+			role: "assistant",
+			content: assistantContent,
+			source: {
+				kind: "model",
+				provider: options.provider,
+				model: options.model
+			}
+		}));
+		for (const result of results) messages.push(createToolResultMessage({
+			callId: CallId(result.callId),
+			content: [{
+				type: "text",
+				text: result.text
+			}],
+			isError: result.isError
+		}));
 	}
 	if (edited) await store.atomicWriteSummary(workingText);
 	await finishExtractionSuccess(store, boundary);
@@ -1018,17 +1032,6 @@ async function finishExtractionSuccess(store, boundary) {
 		fingerprint: boundary.fingerprint,
 		tokens: boundary.tokens,
 		toolCalls: boundary.toolCalls
-	});
-}
-function createAssistantMessageWithBlocks(blocks, options) {
-	return createMessage({
-		role: "assistant",
-		content: blocks,
-		source: {
-			kind: "model",
-			provider: options.provider,
-			model: options.model
-		}
 	});
 }
 //#endregion
