@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-memory",
   "description": "Session-memory compaction engine for DeepSeek Harness (dsh): a port of the astral-code session-memory system — sidechain summary extraction, boundary-tracked tail retention, and checkpoint compaction as a dsh plugin + preset.",
-  "version": "0.1.0-rc.7",
+  "version": "0.1.0-rc.8",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
