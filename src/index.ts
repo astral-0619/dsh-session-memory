@@ -11,7 +11,6 @@
 import type { Context, LoggerService } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import z from '@deepseek-ai/schemastery'
 import {
   DEFAULT_MINIMUM_MESSAGE_TOKENS_TO_INIT,
@@ -22,7 +21,7 @@ import {
   MAX_SIDECHAIN_TOOL_ROUNDS,
 } from './constants.ts'
 import { SessionMemoryEngine, type EngineConfig } from './engine.ts'
-import { runExtraction, type SidechainServices } from './sidechain.ts'
+import { runExtraction } from './sidechain.ts'
 import { SessionMemoryStore } from './store.ts'
 import {
   countToolCalls,
@@ -82,16 +81,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 
   ctx.plugin(SessionMemoryEngine, options)
 
-  // Service references captured eagerly: the sidechain extraction runs after
-  // the turn ends and can outlive the harness context (one-shot drivers
-  // dispose the tree right after quiescence), so it must not resolve services
-  // through the context proxy at extraction time.
-  const services: SidechainServices = {
-    llm: ctx.llm,
-    systemPrompt: ctx.systemPrompt,
-  }
   const logger = ctx.logger
-  const tokenMeter = ctx.tokenMeter
 
   // session -> agent registry populated on every pre-step visit.
   const sessions = new WeakMap<Session, Agent>()
@@ -109,7 +99,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     if (agent === undefined) return
     const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`)
     await store.ensure(options.summaryTemplate)
-    void spawnExtraction(services, tokenMeter, logger, session, agent, store, options, runningExtractions)
+    void spawnExtraction(agent, logger, session, store, options, runningExtractions)
   }
 
   ctx.on('session/event', async (session, event) => {
@@ -131,11 +121,9 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 }
 
 async function spawnExtraction(
-  services: SidechainServices,
-  tokenMeter: TokenMeter,
+  agent: Agent,
   logger: LoggerService,
   session: Session,
-  agent: Agent,
   store: SessionMemoryStore,
   options: Config,
   runningExtractions: Set<Session>,
@@ -143,7 +131,11 @@ async function spawnExtraction(
   runningExtractions.add(session)
   try {
     const state = await store.readState()
-    const measurement = tokenMeter.measure(session)
+    // Services are resolved through the AGENT's scoped context: adapters and
+    // prompt contributions are registered per scope, and the host-plane
+    // instances a plugin sees carry neither.
+    const liveCtx = agent.ctx
+    const measurement = liveCtx.tokenMeter.measure(session)
     const tokens = measurement.totalTokens
     const toolCalls = countToolCalls(session)
 
@@ -183,7 +175,10 @@ async function spawnExtraction(
     await store.markExtractionStarted()
     try {
       await runExtraction(
-        services,
+        {
+          llm: liveCtx.llm,
+          systemPrompt: liveCtx.systemPrompt,
+        },
         session,
         store,
         options.updatePrompt,

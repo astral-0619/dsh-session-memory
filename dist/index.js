@@ -576,6 +576,8 @@ var SessionMemoryEngine = class extends CompactionEngine {
 	config;
 	overflowRetries = /* @__PURE__ */ new WeakMap();
 	overflowAgents = /* @__PURE__ */ new WeakMap();
+	/** session -> agent for scoped service resolution (adapters, token meter). */
+	agents = /* @__PURE__ */ new WeakMap();
 	constructor(ctx, config = {}) {
 		super(ctx);
 		this.config = {
@@ -597,6 +599,7 @@ var SessionMemoryEngine = class extends CompactionEngine {
 			ctx.logger.info(`session-memory compaction (${trigger}): shadowed ${result.shadowedSeqs.length} surface nodes (seqs ${result.shadowedRange.start}-${result.shadowedRange.end}, ~${result.shadowedTokenCount} tokens)`);
 		};
 		ctx.on("agent/pre-step", async ({ agent, signal }, next) => {
+			this.agents.set(agent.session, agent);
 			if (!signal.aborted) try {
 				const result = await this.compactIfNeeded(agent, "pressure", signal);
 				if (result !== null) logResult(result, "step pressure");
@@ -658,12 +661,13 @@ var SessionMemoryEngine = class extends CompactionEngine {
 		} catch {
 			return null;
 		}
-		const measurement = this.ctx.tokenMeter.measure(agent.session);
+		const liveCtx = this.agents.get(agent.session)?.ctx ?? this.ctx;
+		const measurement = liveCtx.tokenMeter.measure(agent.session);
 		const nodes = surfaceNodes(agent.session, measurement);
 		if (trigger === "pressure") {
 			const target = this.routedTarget(agent.session);
 			if (target === void 0) return null;
-			const contextTokens = (await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)).context?.contextWindow;
+			const contextTokens = (await liveCtx.llm.resolveModelInfo(target.provider, target.model, signal)).context?.contextWindow;
 			if (contextTokens === void 0) return null;
 			const threshold = Math.floor(contextTokens * this.config.thresholdRatio);
 			if (measurement.totalTokens < threshold) return null;
@@ -1063,12 +1067,7 @@ function apply(ctx, config = {}) {
 		...config
 	};
 	ctx.plugin(SessionMemoryEngine, options);
-	const services = {
-		llm: ctx.llm,
-		systemPrompt: ctx.systemPrompt
-	};
 	const logger = ctx.logger;
-	const tokenMeter = ctx.tokenMeter;
 	const sessions = /* @__PURE__ */ new WeakMap();
 	const runningExtractions = /* @__PURE__ */ new Set();
 	ctx.on("agent/pre-step", ({ agent }, next) => {
@@ -1081,7 +1080,7 @@ function apply(ctx, config = {}) {
 		if (agent === void 0) return;
 		const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`);
 		await store.ensure(options.summaryTemplate);
-		spawnExtraction(services, tokenMeter, logger, session, agent, store, options, runningExtractions);
+		spawnExtraction(agent, logger, session, store, options, runningExtractions);
 	};
 	ctx.on("session/event", async (session, event) => {
 		if (event.type === "turn/end") {
@@ -1093,11 +1092,12 @@ function apply(ctx, config = {}) {
 		if (status === "idle") maybeSpawnExtraction(agent.session);
 	});
 }
-async function spawnExtraction(services, tokenMeter, logger, session, agent, store, options, runningExtractions) {
+async function spawnExtraction(agent, logger, session, store, options, runningExtractions) {
 	runningExtractions.add(session);
 	try {
 		const state = await store.readState();
-		const measurement = tokenMeter.measure(session);
+		const liveCtx = agent.ctx;
+		const measurement = liveCtx.tokenMeter.measure(session);
 		const tokens = measurement.totalTokens;
 		const toolCalls = countToolCalls(session);
 		const lastSummaryTokens = state.last_summary_tokens ?? 0;
@@ -1122,7 +1122,10 @@ async function spawnExtraction(services, tokenMeter, logger, session, agent, sto
 		}
 		await store.markExtractionStarted();
 		try {
-			await runExtraction(services, session, store, options.updatePrompt, {
+			await runExtraction({
+				llm: liveCtx.llm,
+				systemPrompt: liveCtx.systemPrompt
+			}, session, store, options.updatePrompt, {
 				agent,
 				provider: target.provider,
 				model: target.model,

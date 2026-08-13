@@ -93,6 +93,8 @@ export class SessionMemoryEngine extends CompactionEngine {
   private readonly config: EngineConfig
   private readonly overflowRetries = new WeakMap<Agent, number>()
   private readonly overflowAgents = new WeakMap<Session, Agent>()
+  /** session -> agent for scoped service resolution (adapters, token meter). */
+  private readonly agents = new WeakMap<Session, Agent>()
 
   constructor(
     ctx: Context,
@@ -127,6 +129,7 @@ export class SessionMemoryEngine extends CompactionEngine {
       { agent, signal },
       next,
     ): Promise<PreStepDecision> => {
+      this.agents.set(agent.session, agent)
       if (!signal.aborted) {
         try {
           const result = await this.compactIfNeeded(agent, 'pressure', signal)
@@ -212,13 +215,17 @@ export class SessionMemoryEngine extends CompactionEngine {
       return null
     }
 
-    const measurement = this.ctx.tokenMeter.measure(agent.session)
+    // Services resolve through the agent's scoped context: adapters and the
+    // token meter are registered per scope; the engine's own mount context
+    // carries neither.
+    const liveCtx = this.agents.get(agent.session)?.ctx ?? this.ctx
+    const measurement = liveCtx.tokenMeter.measure(agent.session)
     const nodes = surfaceNodes(agent.session, measurement)
 
     if (trigger === 'pressure') {
       const target = this.routedTarget(agent.session)
       if (target === undefined) return null
-      const modelInfo = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)
+      const modelInfo = await liveCtx.llm.resolveModelInfo(target.provider, target.model, signal)
       const contextTokens = modelInfo.context?.contextWindow
       if (contextTokens === undefined) return null
       const threshold = Math.floor(contextTokens * this.config.thresholdRatio)
