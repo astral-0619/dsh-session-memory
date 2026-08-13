@@ -944,10 +944,10 @@ async function runExtraction(services, session, store, updatePromptTemplate, opt
 			plugin: "dsh-session-memory"
 		}
 	})];
-	for (let round = 0; round < options.maxRounds; round += 1) {
-		let needsFollowUp = false;
-		let editedSummary = false;
-		let anyToolCall = false;
+	let edited = false;
+	let round = 0;
+	for (;;) {
+		round += 1;
 		const assembler = new BlockAssembler();
 		const stream = services.llm.stream({
 			provider: options.provider,
@@ -960,8 +960,11 @@ async function runExtraction(services, session, store, updatePromptTemplate, opt
 		});
 		for await (const chunk of stream) assembler.push(chunk);
 		const blocks = assembler.blocks();
+		if (process.env.DSH_SESSION_MEMORY_DEBUG !== void 0) console.error(`[dsh-session-memory] sidechain round ${round} blocks: ${JSON.stringify(blocks)}`);
 		const assistantBlocks = [];
-		for (const block of blocks) if (block.type === "tool-call") {
+		let anyToolCall = false;
+		for (const block of blocks) {
+			if (block.type !== "tool-call") continue;
 			anyToolCall = true;
 			assistantBlocks.push(block);
 			if (block.name === EDIT_TOOL_NAME) {
@@ -981,32 +984,24 @@ async function runExtraction(services, session, store, updatePromptTemplate, opt
 						text: outcome.result
 					}]
 				});
-				if (outcome.edited) editedSummary = true;
-			} else {
-				needsFollowUp = true;
-				assistantBlocks.push({
-					type: "tool-result",
-					toolCallId: block.id,
-					content: [{
-						type: "text",
-						text: DENY_TOOL_MESSAGE(store.summaryPath)
-					}],
-					isError: true
-				});
-			}
-		} else if (block.type === "text" || block.type === "reasoning") {}
-		if (editedSummary) {
-			await store.atomicWriteSummary(workingText);
-			await finishExtractionSuccess(store, boundary);
-			return boundary;
+				if (outcome.edited) edited = true;
+			} else assistantBlocks.push({
+				type: "tool-result",
+				toolCallId: block.id,
+				content: [{
+					type: "text",
+					text: DENY_TOOL_MESSAGE(store.summaryPath)
+				}],
+				isError: true
+			});
 		}
-		if (anyToolCall) messages.push(createAssistantMessageWithBlocks(assistantBlocks, options));
-		if (!needsFollowUp) {
-			await finishExtractionSuccess(store, boundary);
-			return boundary;
-		}
+		if (!anyToolCall) break;
+		if (round >= options.maxRounds) throw new Error("session memory extraction exceeded tool-call rounds");
+		messages.push(createAssistantMessageWithBlocks(assistantBlocks, options));
 	}
-	throw new Error("session memory extraction exceeded tool-call rounds");
+	if (edited) await store.atomicWriteSummary(workingText);
+	await finishExtractionSuccess(store, boundary);
+	return boundary;
 }
 async function finishExtractionSuccess(store, boundary) {
 	await store.finishExtraction({

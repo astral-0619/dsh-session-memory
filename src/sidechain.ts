@@ -200,10 +200,14 @@ export async function runExtraction(
     }),
   ]
 
-  for (let round = 0; round < options.maxRounds; round += 1) {
-    let needsFollowUp = false
-    let editedSummary = false
-    let anyToolCall = false
+  // Mirror astral's inner loop: process every tool call in a response, then
+  // continue to the next round; the extraction ends when a response contains
+  // no tool calls (the model's final word). Failed edits surface as tool
+  // results so the model can retry, never as an early exit.
+  let edited = false
+  let round = 0
+  for (;;) {
+    round += 1
     const assembler = new BlockAssembler()
 
     const stream = services.llm.stream({
@@ -220,58 +224,53 @@ export async function runExtraction(
     }
 
     const blocks: ContentBlock[] = assembler.blocks()
+    if (process.env.DSH_SESSION_MEMORY_DEBUG !== undefined) {
+      console.error(`[dsh-session-memory] sidechain round ${round} blocks: ${JSON.stringify(blocks)}`)
+    }
     const assistantBlocks: ContentBlock[] = []
+    let anyToolCall = false
     for (const block of blocks) {
-      if (block.type === 'tool-call') {
-        anyToolCall = true
-        assistantBlocks.push(block)
-        if (block.name === EDIT_TOOL_NAME) {
-          let args: EditArgs = {}
-          try {
-            args = JSON.parse(block.arguments) as EditArgs
-          } catch {
-            args = {}
-          }
-          const outcome = applySummaryEdit(workingText, args, store.summaryPath)
-          workingText = outcome.text
-          assistantBlocks.push({
-            type: 'tool-result',
-            toolCallId: block.id,
-            content: [{ type: 'text', text: outcome.result }],
-          })
-          if (outcome.edited) editedSummary = true
-        } else {
-          needsFollowUp = true
-          assistantBlocks.push({
-            type: 'tool-result',
-            toolCallId: block.id,
-            content: [{ type: 'text', text: DENY_TOOL_MESSAGE(store.summaryPath) }],
-            isError: true,
-          })
+      if (block.type !== 'tool-call') {
+        // Text and reasoning stay local to this extraction; nothing enters notes.
+        continue
+      }
+      anyToolCall = true
+      assistantBlocks.push(block)
+      if (block.name === EDIT_TOOL_NAME) {
+        let args: EditArgs = {}
+        try {
+          args = JSON.parse(block.arguments) as EditArgs
+        } catch {
+          args = {}
         }
-      } else if (block.type === 'text' || block.type === 'reasoning') {
-        // Text content stays local to this extraction; nothing enters notes.
+        const outcome = applySummaryEdit(workingText, args, store.summaryPath)
+        workingText = outcome.text
+        assistantBlocks.push({
+          type: 'tool-result',
+          toolCallId: block.id,
+          content: [{ type: 'text', text: outcome.result }],
+        })
+        if (outcome.edited) edited = true
+      } else {
+        assistantBlocks.push({
+          type: 'tool-result',
+          toolCallId: block.id,
+          content: [{ type: 'text', text: DENY_TOOL_MESSAGE(store.summaryPath) }],
+          isError: true,
+        })
       }
     }
 
-    if (editedSummary) {
-      await store.atomicWriteSummary(workingText)
-      await finishExtractionSuccess(store, boundary)
-      return boundary
+    if (!anyToolCall) break
+    if (round >= options.maxRounds) {
+      throw new Error('session memory extraction exceeded tool-call rounds')
     }
-
-    if (anyToolCall) {
-      messages.push(createAssistantMessageWithBlocks(assistantBlocks, options))
-    }
-    if (!needsFollowUp) {
-      // Model produced text (or nothing) without further tool work: extraction
-      // completes; summary unchanged unless an edit already landed above.
-      await finishExtractionSuccess(store, boundary)
-      return boundary
-    }
+    messages.push(createAssistantMessageWithBlocks(assistantBlocks, options))
   }
 
-  throw new Error('session memory extraction exceeded tool-call rounds')
+  if (edited) await store.atomicWriteSummary(workingText)
+  await finishExtractionSuccess(store, boundary)
+  return boundary
 }
 
 async function finishExtractionSuccess(store: SessionMemoryStore, boundary: ExtractionBoundary): Promise<void> {
