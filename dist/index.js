@@ -1,10 +1,10 @@
 import z from "@deepseek-ai/schemastery";
 import { createHash, randomUUID } from "node:crypto";
+import { assembleContextFor } from "@deepseek-ai/dsh-agent";
 import { CompactionEngine, CompactionId, ManualCompactionError, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
-import { BlockAssembler, createMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { BlockAssembler, CONTEXT_WINDOW_EXCEEDED_CODE, createMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { assembleContextFor } from "@deepseek-ai/dsh-agent";
 import { renderPrompt } from "@deepseek-ai/dsh-system-prompt";
 //#region src/constants.ts
 /**
@@ -574,6 +574,8 @@ function inspectEntryState(events) {
 }
 var SessionMemoryEngine = class extends CompactionEngine {
 	config;
+	overflowRetries = /* @__PURE__ */ new WeakMap();
+	overflowAgents = /* @__PURE__ */ new WeakMap();
 	constructor(ctx, config = {}) {
 		super(ctx);
 		this.config = {
@@ -582,6 +584,56 @@ var SessionMemoryEngine = class extends CompactionEngine {
 			storeDir: ".dsh/session-memory",
 			...config
 		};
+		this._registerAutomaticCompaction();
+	}
+	/**
+	* Register automatic between-step pressure and model-request overflow
+	* recovery, mirroring `dsh-compaction-basic`. `compactIfNeeded` stays
+	* dynamically dispatched so subclass overrides are honored at event time.
+	*/
+	_registerAutomaticCompaction() {
+		const { ctx } = this;
+		const logResult = (result, trigger) => {
+			ctx.logger.info(`session-memory compaction (${trigger}): shadowed ${result.shadowedSeqs.length} surface nodes (seqs ${result.shadowedRange.start}-${result.shadowedRange.end}, ~${result.shadowedTokenCount} tokens)`);
+		};
+		ctx.on("agent/pre-step", async ({ agent, signal }, next) => {
+			if (!signal.aborted) try {
+				const result = await this.compactIfNeeded(agent, "pressure", signal);
+				if (result !== null) logResult(result, "step pressure");
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.logger.warn(`session-memory step compaction failed: ${message}; continuing the turn`);
+			}
+			return next();
+		});
+		ctx.on("agent/status", ({ agent, status }) => {
+			if (status === "idle") this.overflowRetries.delete(agent);
+		});
+		ctx.on("session/event", (session, event) => {
+			if (event.type !== "assistant/message") return;
+			const agent = this.overflowAgents.get(session);
+			if (agent !== void 0) this.overflowRetries.delete(agent);
+		});
+		ctx.on("agent/request-error", async ({ agent, failure, signal }, next) => {
+			if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal.aborted) return next();
+			this.overflowAgents.set(agent.session, agent);
+			const retries = this.overflowRetries.get(agent) ?? 0;
+			if (retries >= 3) return next();
+			const generation = agent.session.surface.replaceGeneration;
+			let result;
+			try {
+				result = await this.compactIfNeeded(agent, "context-overflow", signal);
+			} catch (recoveryError) {
+				const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+				ctx.logger.warn(`session-memory overflow compaction failed: ${message}`);
+				return next();
+			}
+			if (result === null) return next();
+			this.overflowRetries.set(agent, retries + 1);
+			if (agent.session.surface.replaceGeneration === generation && result.shadowedSeqs.length === 0) this.overflowRetries.set(agent, retries + 3);
+			logResult(result, "context overflow");
+			return next();
+		});
 	}
 	storeFor(session) {
 		return new SessionMemoryStore(session.id, `${this.config.storeDir}/${session.id}`);
@@ -599,6 +651,7 @@ var SessionMemoryEngine = class extends CompactionEngine {
 	}
 	async compactIfNeeded(agent, trigger, signal) {
 		const store = this.storeFor(agent.session);
+		await store.ensure(this.config.summaryTemplate);
 		let state;
 		try {
 			state = await store.waitForRunningExtraction();
@@ -691,6 +744,7 @@ var SessionMemoryEngine = class extends CompactionEngine {
 		let failure;
 		try {
 			const store = this.storeFor(session);
+			await store.ensure(this.config.summaryTemplate);
 			const summary = await store.readSummary();
 			validateSummary(summary, this.config.summaryTemplate);
 			const { text, wasTruncated } = truncateSummaryForCompact(summary);
@@ -997,14 +1051,16 @@ function apply(ctx, config = {}) {
 		sessions.set(agent.session, agent);
 		return next();
 	});
-	const maybeSpawnExtraction = (session) => {
+	const maybeSpawnExtraction = async (session) => {
 		if (runningExtractions.has(session)) return;
 		const agent = sessions.get(session);
 		if (agent === void 0) return;
-		spawnExtraction(ctx, session, agent, new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`), options, runningExtractions);
+		const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`);
+		await store.ensure(options.summaryTemplate);
+		spawnExtraction(ctx, session, agent, store, options, runningExtractions);
 	};
 	ctx.on("session/event", (session, event) => {
-		if (event.type === "turn/end") queueMicrotask(() => maybeSpawnExtraction(session));
+		if (event.type === "turn/end") queueMicrotask(() => void maybeSpawnExtraction(session));
 	});
 	ctx.on("agent/status", ({ agent, status }) => {
 		if (status === "idle") maybeSpawnExtraction(agent.session);

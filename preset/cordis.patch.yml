@@ -1,0 +1,20 @@
+# dsh-session-memory host-plane patch fragment.
+#
+# This is NOT an agent preset: dsh agent presets may only publish services
+# behind `isolate` realms, and a compaction engine is process-global. Mount
+# these rows in the HOST composition instead — paste into your profile's
+# `cordis.patch.yml`, or apply with `--patch ./preset/cordis.patch.yml`.
+#
+# The session-memory engine replaces `dsh-compaction-basic`; the base row is
+# disabled here so both engines never register `ctx.compaction` at once.
+- id: compaction-basic
+  disabled: true
+- insert:
+    - id: session-memory
+      name: dsh-session-memory
+      config:
+        storeDir: .dsh/session-memory
+        thresholdRatio: 0.75
+        initMessageTokens: 100000
+        updateTokenInterval: 20000
+        updateToolCallInterval: 10

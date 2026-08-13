@@ -81,11 +81,12 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     return next()
   })
 
-  const maybeSpawnExtraction = (session: Session): void => {
+  const maybeSpawnExtraction = async (session: Session): Promise<void> => {
     if (runningExtractions.has(session)) return
     const agent = sessions.get(session)
     if (agent === undefined) return
     const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`)
+    await store.ensure(options.summaryTemplate)
     void spawnExtraction(ctx, session, agent, store, options, runningExtractions)
   }
 
@@ -93,12 +94,12 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     if (event.type === 'turn/end') {
       // Extraction runs after the turn closes; defer one tick so the loop's
       // flush settles before we read the surface.
-      queueMicrotask(() => maybeSpawnExtraction(session))
+      queueMicrotask(() => void maybeSpawnExtraction(session))
     }
   })
 
   ctx.on('agent/status', ({ agent, status }) => {
-    if (status === 'idle') maybeSpawnExtraction(agent.session)
+    if (status === 'idle') void maybeSpawnExtraction(agent.session)
   })
 }
 

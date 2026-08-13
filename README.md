@@ -1,6 +1,6 @@
 # dsh-session-memory
 
-astral-code 的 session memory 系统在 DeepSeek Harness (dsh) 上的复刻：一个 dsh 插件 + preset，把「sidechain 总结抽取 → 尾帧保留 → 边界校验 → 压缩」这套机制移植到 dsh 的 compaction seam 上。
+astral-code 的 session memory 系统在 DeepSeek Harness (dsh) 上的复刻：一个 dsh 插件 + host-plane patch 片段，把「sidechain 总结抽取 → 尾帧保留 → 边界校验 → 压缩」这套机制移植到 dsh 的 compaction seam 上。
 
 ## 机制
 
@@ -21,7 +21,14 @@ astral-code 的 session memory 系统在 DeepSeek Harness (dsh) 上的复刻：�
 
 ## 用法
 
-preset 目录可直接放进 agent-presets 的 root；或手动：
+`preset/cordis.patch.yml` 是 host-plane 补丁片段（compaction 引擎是进程级服务，**不能**作为 agent preset 挂载——dsh 的 agent preset 只允许 `isolate` realm 内的服务）。二选一：
+
+- 粘进 profile 的 `cordis.patch.yml`
+- 或 `--patch ./preset/cordis.patch.yml` 覆盖
+
+该片段会 disable base 的 `compaction-basic` 行并插入 `session-memory` 行（两者不能同时注册 `ctx.compaction`）。
+
+或手动（不用 loader）：
 
 ```ts
 import { apply } from 'dsh-session-memory'
@@ -47,7 +54,7 @@ apply(ctx, { storeDir: '.dsh/session-memory', thresholdRatio: 0.75 })
 ## 与 astral 原版的已知差异
 
 - **sidechain system prompt 与原版一致**：通过 `ctx.systemPrompt.assemble(assembleContextFor(agent))` 取主循环同款组装并 `renderPrompt`，前缀不变（工具差异只在工具面，不进 system 文本）。
-- **无 legacy fallback**：原版 summary 无效时会退回传统压缩引擎；本 preset 不挂 `dsh-compaction-basic`，summary 无效时本轮不压缩并在 `state.json` 记错。
+- **无 legacy fallback**：原版 summary 无效时会退回传统压缩引擎；本 patch 片段 disable 了 `dsh-compaction-basic`，summary 无效时本轮不压缩并在 `state.json` 记错。
 - **压缩时的 summary 不做模型调用**：内容直接来自 sidechain 维护的 `summary.md`（事件里 `llmStreamCall` 不标）。
 - 抽取互斥的进程内守卫 + `state.json` 标记双保险（原版是 `RUNNING_EXTRACTIONS` 全局锁 + 同款状态标记）。
 
