@@ -25,7 +25,6 @@ import {
   type ContentBlock,
   type LlmRuntime,
   type Message,
-  type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { renderPrompt, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
@@ -63,32 +62,6 @@ export interface SidechainServices {
 }
 
 const EDIT_TOOL_NAME = 'edit'
-
-/** Port of the sidechain-visible tool surface: Edit only. */
-export const EDIT_TOOL_SCHEMA: ToolSchema = {
-  name: EDIT_TOOL_NAME,
-  description:
-    'Edit the session notes file. Replaces one exact old_string occurrence with new_string.',
-  parameters: {
-    type: 'object',
-    properties: {
-      file_path: {
-        type: 'string',
-        description: 'The absolute path of the notes file to edit.',
-      },
-      old_string: {
-        type: 'string',
-        description: 'The exact text to replace. Must match exactly once in the file.',
-      },
-      new_string: {
-        type: 'string',
-        description: 'The replacement text.',
-      },
-    },
-    required: ['file_path', 'old_string', 'new_string'],
-    additionalProperties: false,
-  },
-}
 
 interface EditArgs {
   file_path?: unknown
@@ -217,7 +190,11 @@ export async function runExtraction(
       model: options.model,
       system,
       messages,
-      tools: [EDIT_TOOL_SCHEMA],
+      // Astral parity: the tool SCHEMAS are exactly the main loop's (same
+      // assembly.tools); only execution is restricted to edit. This keeps the
+      // wire request byte-identical (system + tools + message prefix) so the
+      // provider's prefix cache hits in full.
+      tools: assembly.tools,
       purpose: 'compaction',
       signal: options.signal,
     })

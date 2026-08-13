@@ -849,34 +849,6 @@ var SessionMemoryEngine = class extends CompactionEngine {
 * @module dsh-session-memory/sidechain
 */
 const EDIT_TOOL_NAME = "edit";
-/** Port of the sidechain-visible tool surface: Edit only. */
-const EDIT_TOOL_SCHEMA = {
-	name: EDIT_TOOL_NAME,
-	description: "Edit the session notes file. Replaces one exact old_string occurrence with new_string.",
-	parameters: {
-		type: "object",
-		properties: {
-			file_path: {
-				type: "string",
-				description: "The absolute path of the notes file to edit."
-			},
-			old_string: {
-				type: "string",
-				description: "The exact text to replace. Must match exactly once in the file."
-			},
-			new_string: {
-				type: "string",
-				description: "The replacement text."
-			}
-		},
-		required: [
-			"file_path",
-			"old_string",
-			"new_string"
-		],
-		additionalProperties: false
-	}
-};
 /** Port of `apply_summary_edit`: str_replace against the working text. */
 function applySummaryEdit(currentText, args, summaryPath) {
 	const filePath = typeof args.file_path === "string" ? args.file_path : "";
@@ -958,7 +930,7 @@ async function runExtraction(services, session, store, updatePromptTemplate, opt
 			model: options.model,
 			system,
 			messages,
-			tools: [EDIT_TOOL_SCHEMA],
+			tools: assembly.tools,
 			purpose: "compaction",
 			signal: options.signal
 		});
