@@ -24,6 +24,14 @@ interface Config extends EngineConfig {
   updateToolCallInterval: number;
   sidechainProvider: string;
   sidechainModel: string;
+  /**
+   * Await the sidechain extraction inside the turn/end listener. One-shot
+   * drivers (dsh headless) exit the process at quiescence, tearing down the
+   * LLM adapter registry before background extraction can run; awaiting keeps
+   * the extraction inside the turn. Long-lived harnesses leave this false so
+   * extraction stays background, like the original.
+   */
+  awaitOnTurnEnd: boolean;
 }
 declare const Config: z<Config>;
 declare const inject: string[];

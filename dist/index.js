@@ -1039,6 +1039,7 @@ const Config = z.object({
 	updateToolCallInterval: z.number().default(10),
 	sidechainProvider: z.string().default(""),
 	sidechainModel: z.string().default(""),
+	awaitOnTurnEnd: z.boolean().default(false),
 	transcriptPath: z.string().default("")
 });
 const inject = [
@@ -1057,6 +1058,7 @@ function apply(ctx, config = {}) {
 		updateToolCallInterval: 10,
 		sidechainProvider: "",
 		sidechainModel: "",
+		awaitOnTurnEnd: false,
 		transcriptPath: "",
 		...config
 	};
@@ -1081,8 +1083,11 @@ function apply(ctx, config = {}) {
 		await store.ensure(options.summaryTemplate);
 		spawnExtraction(services, tokenMeter, logger, session, agent, store, options, runningExtractions);
 	};
-	ctx.on("session/event", (session, event) => {
-		if (event.type === "turn/end") queueMicrotask(() => void maybeSpawnExtraction(session));
+	ctx.on("session/event", async (session, event) => {
+		if (event.type === "turn/end") {
+			if (options.awaitOnTurnEnd) await maybeSpawnExtraction(session);
+			else queueMicrotask(() => void maybeSpawnExtraction(session));
+		}
 	});
 	ctx.on("agent/status", ({ agent, status }) => {
 		if (status === "idle") maybeSpawnExtraction(agent.session);

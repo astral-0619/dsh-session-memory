@@ -38,6 +38,14 @@ export interface Config extends EngineConfig {
   updateToolCallInterval: number
   sidechainProvider: string
   sidechainModel: string
+  /**
+   * Await the sidechain extraction inside the turn/end listener. One-shot
+   * drivers (dsh headless) exit the process at quiescence, tearing down the
+   * LLM adapter registry before background extraction can run; awaiting keeps
+   * the extraction inside the turn. Long-lived harnesses leave this false so
+   * extraction stays background, like the original.
+   */
+  awaitOnTurnEnd: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -50,6 +58,7 @@ export const Config: z<Config> = z.object({
   updateToolCallInterval: z.number().default(DEFAULT_TOOL_CALLS_BETWEEN_UPDATES),
   sidechainProvider: z.string().default(''),
   sidechainModel: z.string().default(''),
+  awaitOnTurnEnd: z.boolean().default(false),
   transcriptPath: z.string().default(''),
 })
 
@@ -66,6 +75,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     updateToolCallInterval: DEFAULT_TOOL_CALLS_BETWEEN_UPDATES,
     sidechainProvider: '',
     sidechainModel: '',
+    awaitOnTurnEnd: false,
     transcriptPath: '',
     ...config,
   }
@@ -102,11 +112,16 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     void spawnExtraction(services, tokenMeter, logger, session, agent, store, options, runningExtractions)
   }
 
-  ctx.on('session/event', (session, event) => {
+  ctx.on('session/event', async (session, event) => {
     if (event.type === 'turn/end') {
       // Extraction runs after the turn closes; defer one tick so the loop's
-      // flush settles before we read the surface.
-      queueMicrotask(() => void maybeSpawnExtraction(session))
+      // flush settles before we read the surface. `awaitOnTurnEnd` keeps it
+      // inside the turn for one-shot harnesses that exit at quiescence.
+      if (options.awaitOnTurnEnd) {
+        await maybeSpawnExtraction(session)
+      } else {
+        queueMicrotask(() => void maybeSpawnExtraction(session))
+      }
     }
   })
 
