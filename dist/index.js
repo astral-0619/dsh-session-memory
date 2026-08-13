@@ -1043,7 +1043,6 @@ const Config = z.object({
 	updateToolCallInterval: z.number().default(10),
 	sidechainProvider: z.string().default(""),
 	sidechainModel: z.string().default(""),
-	awaitOnTurnEnd: z.boolean().default(false),
 	transcriptPath: z.string().default("")
 });
 const inject = [
@@ -1062,43 +1061,44 @@ function apply(ctx, config = {}) {
 		updateToolCallInterval: 10,
 		sidechainProvider: "",
 		sidechainModel: "",
-		awaitOnTurnEnd: false,
 		transcriptPath: "",
 		...config
 	};
 	ctx.plugin(SessionMemoryEngine, options);
 	const logger = ctx.logger;
 	const sessions = /* @__PURE__ */ new WeakMap();
-	const runningExtractions = /* @__PURE__ */ new Set();
+	const runningExtractions = /* @__PURE__ */ new Map();
 	ctx.on("agent/pre-step", ({ agent }, next) => {
 		sessions.set(agent.session, agent);
 		return next();
 	});
 	const maybeSpawnExtraction = async (session) => {
-		if (process.env.DSH_SESSION_MEMORY_DEBUG !== void 0) console.error("[dsh-session-memory] spawn check: guard=%s agent=%s", runningExtractions.has(session), sessions.has(session));
-		if (runningExtractions.has(session)) return;
+		const running = runningExtractions.get(session);
+		if (running !== void 0) return running;
 		const agent = sessions.get(session);
 		if (agent === void 0) return;
 		const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`);
-		await store.ensure(options.summaryTemplate);
-		spawnExtraction(agent, logger, session, store, options, runningExtractions);
+		const extraction = spawnExtraction(ctx, agent, logger, session, store, options).finally(() => {
+			runningExtractions.delete(session);
+		});
+		runningExtractions.set(session, extraction);
+		await extraction;
 	};
-	ctx.on("session/event", async (session, event) => {
-		if (event.type === "turn/end") {
-			if (options.awaitOnTurnEnd) await maybeSpawnExtraction(session);
-			else queueMicrotask(() => void maybeSpawnExtraction(session));
-		}
+	ctx.on("session/event", (session, event) => {
+		if (event.type === "turn/end") queueMicrotask(() => void maybeSpawnExtraction(session));
 	});
 	ctx.on("agent/status", ({ agent, status }) => {
 		if (status === "idle") maybeSpawnExtraction(agent.session);
 	});
+	ctx.on("session/flush", async (session) => {
+		await maybeSpawnExtraction(session);
+	});
 }
-async function spawnExtraction(agent, logger, session, store, options, runningExtractions) {
-	runningExtractions.add(session);
+async function spawnExtraction(ctx, agent, logger, session, store, options) {
 	try {
+		await store.ensure(options.summaryTemplate);
 		const state = await store.readState();
-		const liveCtx = agent.ctx;
-		const measurement = liveCtx.tokenMeter.measure(session);
+		const measurement = ctx.get("tokenMeter").measure(session);
 		const tokens = measurement.totalTokens;
 		const toolCalls = countToolCalls(session);
 		const lastSummaryTokens = state.last_summary_tokens ?? 0;
@@ -1125,9 +1125,15 @@ async function spawnExtraction(agent, logger, session, store, options, runningEx
 		}
 		await store.markExtractionStarted();
 		try {
+			const llm = ctx.get("llm");
+			const systemPrompt = ctx.get("systemPrompt");
+			if (llm === void 0 || systemPrompt === void 0) {
+				await store.finishExtraction(void 0, "llm/systemPrompt services unavailable");
+				return;
+			}
 			await runExtraction({
-				llm: liveCtx.llm,
-				systemPrompt: liveCtx.systemPrompt
+				llm,
+				systemPrompt
 			}, session, store, options.updatePrompt, {
 				agent,
 				provider: target.provider,
@@ -1143,8 +1149,6 @@ async function spawnExtraction(agent, logger, session, store, options, runningEx
 		const message = error instanceof Error ? error.message : String(error);
 		if (process.env.DSH_SESSION_MEMORY_DEBUG !== void 0) console.error(`[dsh-session-memory] extraction spawn failed: ${message}\n${error.stack ?? ""}`);
 		logger.warn(`session-memory extraction spawn failed: ${message}`);
-	} finally {
-		runningExtractions.delete(session);
 	}
 }
 function resolveSidechainTarget(session, options) {

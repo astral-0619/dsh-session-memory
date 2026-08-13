@@ -37,14 +37,6 @@ export interface Config extends EngineConfig {
   updateToolCallInterval: number
   sidechainProvider: string
   sidechainModel: string
-  /**
-   * Await the sidechain extraction inside the turn/end listener. One-shot
-   * drivers (dsh headless) exit the process at quiescence, tearing down the
-   * LLM adapter registry before background extraction can run; awaiting keeps
-   * the extraction inside the turn. Long-lived harnesses leave this false so
-   * extraction stays background, like the original.
-   */
-  awaitOnTurnEnd: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -57,7 +49,6 @@ export const Config: z<Config> = z.object({
   updateToolCallInterval: z.number().default(DEFAULT_TOOL_CALLS_BETWEEN_UPDATES),
   sidechainProvider: z.string().default(''),
   sidechainModel: z.string().default(''),
-  awaitOnTurnEnd: z.boolean().default(false),
   transcriptPath: z.string().default(''),
 })
 
@@ -74,7 +65,6 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     updateToolCallInterval: DEFAULT_TOOL_CALLS_BETWEEN_UPDATES,
     sidechainProvider: '',
     sidechainModel: '',
-    awaitOnTurnEnd: false,
     transcriptPath: '',
     ...config,
   }
@@ -85,8 +75,9 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 
   // session -> agent registry populated on every pre-step visit.
   const sessions = new WeakMap<Session, Agent>()
-  // In-process extraction guard (port of RUNNING_EXTRACTIONS).
-  const runningExtractions = new Set<Session>()
+  // In-process extraction guard (port of RUNNING_EXTRACTIONS): one in-flight
+  // extraction per session, tracked as a promise so flush can await it.
+  const runningExtractions = new Map<Session, Promise<void>>()
 
   ctx.on('agent/pre-step', ({ agent }, next) => {
     sessions.set(agent.session, agent)
@@ -94,50 +85,55 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
   })
 
   const maybeSpawnExtraction = async (session: Session): Promise<void> => {
-    const debug = process.env.DSH_SESSION_MEMORY_DEBUG !== undefined
-    if (debug) console.error('[dsh-session-memory] spawn check: guard=%s agent=%s', runningExtractions.has(session), sessions.has(session))
-    if (runningExtractions.has(session)) return
+    const running = runningExtractions.get(session)
+    if (running !== undefined) return running
     const agent = sessions.get(session)
     if (agent === undefined) return
     const store = new SessionMemoryStore(session.id, `${options.storeDir}/${session.id}`)
-    await store.ensure(options.summaryTemplate)
-    void spawnExtraction(agent, logger, session, store, options, runningExtractions)
+    const extraction = spawnExtraction(ctx, agent, logger, session, store, options).finally(() => {
+      runningExtractions.delete(session)
+    })
+    runningExtractions.set(session, extraction)
+    await extraction
   }
 
-  ctx.on('session/event', async (session, event) => {
+  ctx.on('session/event', (session, event) => {
     if (event.type === 'turn/end') {
-      // Extraction runs after the turn closes; defer one tick so the loop's
-      // flush settles before we read the surface. `awaitOnTurnEnd` keeps it
-      // inside the turn for one-shot harnesses that exit at quiescence.
-      if (options.awaitOnTurnEnd) {
-        await maybeSpawnExtraction(session)
-      } else {
-        queueMicrotask(() => void maybeSpawnExtraction(session))
-      }
+      // Background extraction after the turn closes (deferred one tick so the
+      // loop's flush settles before we read the surface).
+      queueMicrotask(() => void maybeSpawnExtraction(session))
     }
   })
 
   ctx.on('agent/status', ({ agent, status }) => {
     if (status === 'idle') void maybeSpawnExtraction(agent.session)
   })
+
+  // `session/flush` is awaited by its callers (the headless runner awaits it
+  // before exiting), so awaiting the extraction here keeps one-shot harnesses
+  // alive until the sidechain finishes. Long-lived harnesses mostly take the
+  // background path above; this listener then just awaits whatever is pending.
+  ctx.on('session/flush', async (session) => {
+    await maybeSpawnExtraction(session)
+  })
 }
 
 async function spawnExtraction(
+  ctx: Context,
   agent: Agent,
   logger: LoggerService,
   session: Session,
   store: SessionMemoryStore,
   options: Config,
-  runningExtractions: Set<Session>,
 ): Promise<void> {
-  runningExtractions.add(session)
   try {
+    await store.ensure(options.summaryTemplate)
     const state = await store.readState()
-    // Services are resolved through the AGENT's scoped context: adapters and
-    // prompt contributions are registered per scope, and the host-plane
-    // instances a plugin sees carry neither.
-    const liveCtx = agent.ctx
-    const measurement = liveCtx.tokenMeter.measure(session)
+    // Services resolve through ctx.get() (not property access): cordis
+    // property proxies reject undeclared injects and inactive contexts, while
+    // get() reads the store directly. The adapter registry lives on these
+    // root-plane instances — the same ones the loop uses.
+    const measurement = ctx.get('tokenMeter').measure(session)
     const tokens = measurement.totalTokens
     const toolCalls = countToolCalls(session)
 
@@ -179,11 +175,14 @@ async function spawnExtraction(
 
     await store.markExtractionStarted()
     try {
+      const llm = ctx.get('llm')
+      const systemPrompt = ctx.get('systemPrompt')
+      if (llm === undefined || systemPrompt === undefined) {
+        await store.finishExtraction(undefined, 'llm/systemPrompt services unavailable')
+        return
+      }
       await runExtraction(
-        {
-          llm: liveCtx.llm,
-          systemPrompt: liveCtx.systemPrompt,
-        },
+        { llm, systemPrompt },
         session,
         store,
         options.updatePrompt,
@@ -206,8 +205,6 @@ async function spawnExtraction(
       console.error(`[dsh-session-memory] extraction spawn failed: ${message}\n${(error as Error).stack ?? ''}`)
     }
     logger.warn(`session-memory extraction spawn failed: ${message}`)
-  } finally {
-    runningExtractions.delete(session)
   }
 }
 
