@@ -1,0 +1,14 @@
+# dsh-session-memory preset: session-memory compaction on top of dsh.
+# Flat plugin rows; `id` is the instance id, `name` the module specifier.
+- id: host-export
+  name: '@deepseek-ai/dsh-host-export'
+- id: checkpoint-filesystem
+  name: '@deepseek-ai/dsh-session-checkpoint-fs'
+- id: session-memory
+  name: dsh-session-memory
+  config:
+    storeDir: .dsh/session-memory
+    thresholdRatio: 0.75
+    initMessageTokens: 100000
+    updateTokenInterval: 20000
+    updateToolCallInterval: 10

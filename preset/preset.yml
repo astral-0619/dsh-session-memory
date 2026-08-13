@@ -1,0 +1,2 @@
+name: Session Memory
+description: astral-code style session memory: sidechain summary extraction, boundary-tracked verbatim tail retention, and checkpoint compaction.
