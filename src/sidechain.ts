@@ -229,7 +229,10 @@ export async function runExtraction(
     if (process.env.DSH_SESSION_MEMORY_DEBUG !== undefined) {
       console.error(`[dsh-session-memory] sidechain round ${round} blocks: ${JSON.stringify(blocks)} finish: ${JSON.stringify(assembler.finish)}`)
     }
-    if (assembler.finish.kind !== 'stop' && assembler.finish.kind !== 'max-tokens') {
+    const okFinish = assembler.finish.kind === 'stop'
+      || assembler.finish.kind === 'max-tokens'
+      || assembler.finish.kind === 'tool-calls'
+    if (!okFinish) {
       const reason = assembler.finish as { kind: string }
       const detail = 'failure' in reason
         ? JSON.stringify((reason as { failure: unknown }).failure)

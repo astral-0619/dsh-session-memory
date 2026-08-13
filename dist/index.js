@@ -965,7 +965,7 @@ async function runExtraction(services, session, store, updatePromptTemplate, opt
 		for await (const chunk of stream) assembler.push(chunk);
 		const blocks = assembler.blocks();
 		if (process.env.DSH_SESSION_MEMORY_DEBUG !== void 0) console.error(`[dsh-session-memory] sidechain round ${round} blocks: ${JSON.stringify(blocks)} finish: ${JSON.stringify(assembler.finish)}`);
-		if (assembler.finish.kind !== "stop" && assembler.finish.kind !== "max-tokens") {
+		if (!(assembler.finish.kind === "stop" || assembler.finish.kind === "max-tokens" || assembler.finish.kind === "tool-calls")) {
 			const reason = assembler.finish;
 			const detail = "failure" in reason ? JSON.stringify(reason.failure) : reason.kind;
 			throw new Error(`sidechain LLM call ended with ${reason.kind}: ${detail}`);
